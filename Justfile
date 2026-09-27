@@ -223,10 +223,29 @@ validate:
 
 # ── Build ─────────────────────────────────────────────────────────────
 # Build one OCI image (controlled by BUILD_IMAGE_NAME) and load into podman.
+# gitlab.gnome.org (the gnome-build-meta junction fetch) intermittently hits
+# a read timeout under CI network conditions (see #336). That junction uses
+# the git_repo source plugin (buildstream-plugins-community), whose fetch
+# failures are raised as SourceError with temporary=False
+# (_git_utils.py's CONNECTION_ERRORS handling never sets temporary=True), so
+# BuildStream's own --network-retries scheduler-level retry never triggers
+# for it; passing that flag would build without ever actually retrying this
+# failure. Retry the *fetch* from the outside instead, then build once, so a
+# deterministic build failure (compile error, bad ref, stale patch) still
+# reports red on the first attempt instead of being rebuilt five times.
 [group('build')]
 build:
     #!/usr/bin/env bash
     set -euo pipefail
+    echo "==> Fetching gnome-build-meta junction..."
+    for attempt in 1 2 3 4 5; do
+        if just bst source fetch gnome-build-meta.bst; then
+            break
+        fi
+        echo "bst source fetch failed (attempt ${attempt}/5)" >&2
+        if [[ "$attempt" -eq 5 ]]; then exit 1; fi
+        sleep 15
+    done
     echo "==> Building oci/{{image_name}}.bst with BuildStream..."
     just bst build "oci/{{image_name}}.bst"
     just export

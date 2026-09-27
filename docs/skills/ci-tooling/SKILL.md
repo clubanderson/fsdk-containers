@@ -278,6 +278,47 @@ FAIL: guest did not reach its ready point within 300s
       (serial console uploaded as artifact 'vm-boot-serial-x86_64')
 ```
 
+### Transient `gnome-build-meta` fetch timeouts — retry `bst source fetch`
+
+A `just build`/`just verify` matrix leg can fail with:
+
+```
+failed to fetch: HTTPSConnectionPool(host='gitlab.gnome.org', port=443): Read timed out. (read timeout=30.0)
+```
+
+This is a transient network blip while fetching the `gnome-build-meta`
+junction, not a code or config bug (#336). **`--network-retries` does not fix
+this**, even though `just bst` forwards it ahead of the subcommand: BuildStream
+only retries a job when the underlying error is raised with `temporary=True`,
+and the `gnome-build-meta` junction uses the `git_repo` source plugin
+(`buildstream-plugins-community`), whose `_git_utils.py` raises fetch failures
+(including this read timeout) as `SourceError` with the default
+`temporary=False`. So passing the flag builds without ever actually retrying
+the failure. `printing-base-bundle` carried the same flag for the same reason;
+it has been dropped there.
+
+Retry the *fetch* from the outside instead, then build once — the way
+`ps-printer-app`'s `fetch` recipe does. Do **not** wrap `bst build` itself in
+the retry loop: that also retries deterministic failures (compile error, bad
+ref, stale patch), rebuilding the failing element up to five times and risking
+the 180-minute job timeout before the leg reports red.
+
+```just
+for attempt in 1 2 3 4 5; do
+    if just bst source fetch gnome-build-meta.bst; then
+        break
+    fi
+    echo "bst source fetch failed (attempt ${attempt}/5)" >&2
+    if [[ "$attempt" -eq 5 ]]; then exit 1; fi
+    sleep 15
+done
+just bst build "oci/{{image_name}}.bst"
+```
+
+If `validate` or `verify` start exhibiting the same intermittent failure,
+apply the same external fetch retry loop there rather than reaching for
+`--network-retries`.
+
 ## Common Rationalizations
 
 | Rationalization | Reality |
